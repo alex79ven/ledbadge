@@ -343,8 +343,10 @@ true` is set. Use the MQTT credentials from Home Assistant.
 > the data through MQTT; its own Bluetooth integration will not list the badge.
 
 Enable it on the web page and set a base topic (default `ledbadge/ble`). The
-badge then passively scans BLE advertisements (NimBLE, ~25 % duty so Wi-Fi
-keeps working) and publishes one JSON message per device per 5 s:
+badge then scans BLE advertisements (NimBLE, ~25 % duty so Wi-Fi keeps working)
+and publishes one JSON message per device per 5 s. The scan is active, so the
+badge also asks for scan responses: that is where most tags keep their name.
+Each sighting looks like this:
 
 ```
 topic:   ledbadge/ble/a4c1382f9b1e
@@ -353,6 +355,9 @@ payload: {"addr":"a4:c1:38:2f:9b:1e","rssi":-63,"name":"ATC_2f9b1e","mdata":"1a1
 
 - `mdata` is the manufacturer data in hex (iBeacon UUID/major/minor, Xiaomi
   sensor frames, etc.), `addr` the current BLE address.
+- The serial console prints `BLE: <addr> rssi=<n> name=[<name>]` once for every
+  newly heard device, so you can see whether a tag is received at all even when
+  Home Assistant shows nothing.
 - Optional: tick **Create Home Assistant sensors for BLE devices** and every
   *named* device gets its own RSSI sensor (with `expire_after: 60`), grouped
   under the badge device. Handy for fobs; phones with rotating addresses would

@@ -2442,7 +2442,8 @@ void bleStart() {
 
   NimBLEScan *scan = NimBLEDevice::getScan();
   scan->setScanCallbacks(&bleCallbacks, true);  // true = report duplicates
-  scan->setActiveScan(false);                   // passive: receives, never transmits
+  scan->setActiveScan(true);                    // ask for scan responses: that
+                                                // is where most fobs put their name
   scan->setInterval(320);                       // 320 ms period, 80 ms window
   scan->setWindow(80);                          // = 25 % duty, leaves Wi-Fi room
   scan->setMaxResults(0);
@@ -2485,6 +2486,9 @@ void blePublish(const BleAdv &a) {
     seen[slot][sizeof(seen[slot]) - 1] = '\0';
     seenAt[slot] = 0;
     seenDisc[slot] = false;
+    // One line per newly heard device: short, rare, and very useful when a tag
+    // does not show up in Home Assistant.
+    Serial.printf("BLE: %s rssi=%d name=[%s]\n", a.addr, (int)a.rssi, a.name);
   }
 
   char plain[18];
