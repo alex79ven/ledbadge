@@ -47,6 +47,7 @@ arduino-cli lib install Adafruit_NeoPixel PubSubClient NimBLE-Arduino
 |---|---|
 | Single click **BOOT** | next base colour (both effects) |
 | Double click **BOOT** | next effect: clock → lamp knob → clock |
+| Double tap the matrix | next effect (accelerometer detects two sharp taps; same as a double click on BOOT) |
 | Hold **BOOT** (≥ 0.5 s) | animation dynamics: ramps 50 → 200 %, then back down while still held |
 | Rotate the badge upright, or turn it flat on the table | lamp knob: dimmer percentage (gyro when flat) |
 | Web page | Wi-Fi, time zone, weather city, colours, brightness, MQTT and BLE |
@@ -484,6 +485,7 @@ All behaviour constants are at the top of the sketch:
 | `BLE_DEFAULT_TOPIC` | base topic for BLE advertisements (`base/<mac>`) |
 | `BLE_PUBLISH_MS` | per-device publish throttle (5 s) |
 | `DOUBLE_CLICK_MS` | double-click window (default 350 ms) |
+| `TAP_TRIGGER_G` / `TAP_WINDOW_MS` | double-tap impact threshold (1.8 g) and window (350 ms) |
 
 `DEBUG_KNOB 1` streams tilt angles, the raw accelerometer and the current knob
 percentage over USB serial at 2 Hz. Keep it at `0` for stand-alone use: a

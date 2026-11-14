@@ -63,6 +63,16 @@
 #define KNOB_GYRO_BIAS_MS  1500UL // still time before the gyro zero is relearnt
 #define KNOB_PUBLISH_MS    200UL  // MQTT publish throttle
 
+// ---- double tap on the matrix -------------------------------------------
+// A tap is a short shock through the board: the accelerometer briefly sees
+// well over 1 g. Two of them inside the window switch the effect, exactly like
+// a double click on BOOT. The knob ignores the shock instead of jumping.
+#define TAP_TRIGGER_G      1.8f
+#define TAP_RELEASE_G      1.35f   // below this the detector re-arms
+#define TAP_MIN_GAP_MS     70UL    // two peaks closer than this are one tap
+#define TAP_WINDOW_MS      350UL   // first tap -> second tap
+#define TAP_KNOB_HOLD_MS   300UL   // knob stays frozen after an impact
+
 // Set to 1 to stream tilt and knob values over USB serial (keep 0 stand-alone).
 #define DEBUG_KNOB      0
 
@@ -192,6 +202,9 @@ float tiltAngleX = 0.0f;
 float tiltAngleY = 0.0f;
 // last raw accelerometer sample in g (the dimmer needs it unsmoothed)
 float tiltAX = 0.0f, tiltAY = 0.0f, tiltAZ = 0.0f;
+// time of the last tap impulse, and the pending effect switch it asked for
+volatile unsigned long tapPeakMs = 0;
+volatile bool tapSwitchPending = false;
 
 // ---- lamp dimmer state ----
 int knobPct = 50;              // lamp brightness sent to Home Assistant, 0..100
@@ -496,6 +509,13 @@ void loop() {
 
   updateTilt(dt);
 
+  // ---- double tap on the matrix: same action as a double click on BOOT ----
+  if (tapSwitchPending) {
+    tapSwitchPending = false;
+    setEffect((uint8_t)((effectIndex + 1) % EFFECT_COUNT));
+    Serial.println("TAP: double tap");
+  }
+
   // ---- boot greeting: scroll the IP address once after Wi-Fi comes up ----
   if (bootMsgPending) {
     bootMsgPending = false;
@@ -631,13 +651,46 @@ void updateTilt(float dt) {
     tiltAY = ay;
     tiltAZ = az;
 
-    // Same angle convention as the spirit-level firmware.
-    float rawX = atan2f(ay, sqrtf(ax * ax + az * az)) * 180.0f / PI;
-    float rawY = atan2f(-ax, sqrtf(ay * ay + az * az)) * 180.0f / PI;
+    // ---- double tap: a sharp impact, not a turn ----
+    // A tap sends the magnitude far above the 1 g of rest. Count a rising edge
+    // above TAP_TRIGGER_G as one tap, re-arm only after the signal falls below
+    // TAP_RELEASE_G (so a single long shock stays one tap), and switch on the
+    // second tap inside TAP_WINDOW_MS.
+    float mag = sqrtf(ax * ax + ay * ay + az * az);
+    static bool tapHigh = false;
+    static unsigned long lastTapMs = 0;
+    static unsigned long firstTapMs = 0;
+    unsigned long nowMs = millis();
 
-    float aAng = 1.0f - expf(-dt / 0.06f);
-    angleX += aAng * (rawX - angleX);
-    angleY += aAng * (rawY - angleY);
+    if (mag > TAP_TRIGGER_G) {
+      tapPeakMs = nowMs;
+      if (!tapHigh) {
+        tapHigh = true;
+        if (nowMs - lastTapMs >= TAP_MIN_GAP_MS) {
+          lastTapMs = nowMs;
+          if (firstTapMs != 0 && nowMs - firstTapMs <= TAP_WINDOW_MS) {
+            firstTapMs = 0;  // consumed: this was the second tap
+            tapSwitchPending = true;
+          } else {
+            firstTapMs = nowMs;
+          }
+        }
+      }
+    } else if (mag < TAP_RELEASE_G) {
+      tapHigh = false;
+    }
+
+    // The impact vector would look like a violent tilt for one frame: keep it
+    // out of the smoothed angles the clock uses to stay upright.
+    if (mag <= TAP_TRIGGER_G) {
+      // Same angle convention as the spirit-level firmware.
+      float rawX = atan2f(ay, sqrtf(ax * ax + az * az)) * 180.0f / PI;
+      float rawY = atan2f(-ax, sqrtf(ay * ay + az * az)) * 180.0f / PI;
+
+      float aAng = 1.0f - expf(-dt / 0.06f);
+      angleX += aAng * (rawX - angleX);
+      angleY += aAng * (rawY - angleY);
+    }
   }
 
   tiltAngleX = angleX;
@@ -673,51 +726,61 @@ void updateDimmer(float dt) {
   unsigned long now = millis();
   float delta = 0.0f;  // percent, before smoothing/clamping
 
+  // A tap is a shock, not a turn. Right after an impact the raw angle is
+  // meaningless, so the knob re-seeds from the current angle and stays still.
+  bool shock = (now - tapPeakMs) < TAP_KNOB_HOLD_MS;
+
   float inPlane = sqrtf(tiltAX * tiltAX + tiltAY * tiltAY);
 
   if (inPlane >= KNOB_FLAT_G) {
     // ---- upright: absolute angle from gravity ----
     float ang = atan2f(tiltAY, tiltAX) * 180.0f / PI;
-    if (!knobAngleValid) {
+    if (!knobAngleValid || shock) {
       knobAngle = ang;
       knobAngleValid = true;
-    }
-    float d = ang - knobAngle;
-    while (d > 180.0f) d -= 360.0f;
-    while (d < -180.0f) d += 360.0f;
-    knobAngle = ang;
+      gyroStillSince = now;
+    } else {
+      float d = ang - knobAngle;
+      while (d > 180.0f) d -= 360.0f;
+      while (d < -180.0f) d += 360.0f;
+      knobAngle = ang;
 
-    // Ignore sensor noise, then clockwise (negative d) raises brightness.
-    if (fabsf(d) < KNOB_DEADBAND_DEG) d = 0.0f;
-    // Near flat the in-plane angle becomes ill-conditioned; a big jump there
-    // is a lift/tilt, not a turn, so cap the per-frame step (real turns stay
-    // far below this at 60 fps).
-    if (d > 20.0f) d = 20.0f;
-    if (d < -20.0f) d = -20.0f;
-    delta = -d / KNOB_DEG_PER_PCT;
-    gyroStillSince = now;
+      // Ignore sensor noise, then clockwise (negative d) raises brightness.
+      if (fabsf(d) < KNOB_DEADBAND_DEG) d = 0.0f;
+      // Near flat the in-plane angle becomes ill-conditioned; a big jump there
+      // is a lift/tilt, not a turn, so cap the per-frame step (real turns stay
+      // far below this at 60 fps).
+      if (d > 20.0f) d = 20.0f;
+      if (d < -20.0f) d = -20.0f;
+      delta = -d / KNOB_DEG_PER_PCT;
+      gyroStillSince = now;
+    }
   } else {
     // ---- flat on the table: integrate the gyro rate ----
     knobAngleValid = false;
-    float gx, gy, gz;
-    qmiReadGyro(gx, gy, gz);
-    (void)gx;
-    (void)gy;
-
-    // While the badge is still, the gyro output is pure bias: keep learning
-    // it so a slow turn does not fight a drifting zero point. Only very small
-    // rates count as "still" - a slow deliberate turn must not be absorbed.
-    if (fabsf(gz - gyroBias) < 0.6f) {
-      if (now - gyroStillSince > KNOB_GYRO_BIAS_MS) {
-        gyroBias += (gz - gyroBias) * 0.01f;
-      }
-    } else {
+    if (shock) {
       gyroStillSince = now;
-    }
+    } else {
+      float gx, gy, gz;
+      qmiReadGyro(gx, gy, gz);
+      (void)gx;
+      (void)gy;
 
-    float dps = (gz - gyroBias) * KNOB_GYRO_SIGN;
-    if (fabsf(dps) < KNOB_GYRO_DEADBAND) dps = 0.0f;
-    delta = dps * dt / KNOB_DEG_PER_PCT;
+      // While the badge is still, the gyro output is pure bias: keep learning
+      // it so a slow turn does not fight a drifting zero point. Only very small
+      // rates count as "still" - a slow deliberate turn must not be absorbed.
+      if (fabsf(gz - gyroBias) < 0.6f) {
+        if (now - gyroStillSince > KNOB_GYRO_BIAS_MS) {
+          gyroBias += (gz - gyroBias) * 0.01f;
+        }
+      } else {
+        gyroStillSince = now;
+      }
+
+      float dps = (gz - gyroBias) * KNOB_GYRO_SIGN;
+      if (fabsf(dps) < KNOB_GYRO_DEADBAND) dps = 0.0f;
+      delta = dps * dt / KNOB_DEG_PER_PCT;
+    }
   }
 
   if (delta != 0.0f) {
