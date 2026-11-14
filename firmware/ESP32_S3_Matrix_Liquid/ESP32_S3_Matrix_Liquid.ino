@@ -1890,6 +1890,14 @@ void clockEnter() {
   clockMoving = false;
   clockNextMove = millis() + 1500UL;
   clockTimeLogged = false;
+
+  // Fetch the weather on the first entry; afterwards the network task keeps
+  // the 15-minute refresh (and the 60-second retry until the first success).
+  if (weatherLastTry == 0 ||
+      millis() - weatherLastTry >=
+          (weatherValid ? WEATHER_REFRESH_MS : 60000UL)) {
+    weatherRequest = true;
+  }
 }
 
 void clockLeave() {
@@ -2204,7 +2212,7 @@ void netLoop() {
           Serial.printf("CLOCK: time %02d:%02d:%02d\n", tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
         }
         // Weather is only interesting while the clock effect is showing.
-        if (effectIndex == 2) {
+        if (effectIndex == 0) {
           unsigned long since = now - weatherLastTry;
           unsigned long period = weatherValid ? WEATHER_REFRESH_MS : 60000UL;
           if (!weatherRequest && since >= period) weatherRequest = true;
