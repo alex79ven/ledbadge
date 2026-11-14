@@ -767,9 +767,9 @@ static void dimDigit(uint8_t *fr, uint8_t *fg, uint8_t *fb, int x, int y,
   }
 }
 
-// 8x8 dimmer face: the percentage in 3x5 digits above a level bar. The frame
-// is pushed without the upright correction, so the reading turns with the
-// badge exactly like a real knob.
+// 8x8 dimmer face: just the percentage, in 3x5 digits with a clear two-pixel
+// gap between them. The frame is pushed without the upright correction, so the
+// reading turns with the badge exactly like a real knob.
 void renderDimmer() {
   uint8_t fr[64], fg[64], fb[64];
   memset(fr, 0, sizeof(fr));
@@ -785,26 +785,17 @@ void renderDimmer() {
   int r = (int)(255 * k), g = (int)(198 * k), b = (int)(120 * k);
 
   if (pct >= 100) {
-    // "100" does not fit in 8 columns: the hundreds digit is a 1-px stroke
+    // "100" does not fit in 8 columns with a gap: the hundreds digit is a
+    // 1-px stroke at the left edge, then the two zeros fill the rest.
     for (int row = 0; row < 5; row++) dimSet(fr, fg, fb, 0, 1 + row, r, g, b);
     dimDigit(fr, fg, fb, 2, 1, 0, r, g, b);
     dimDigit(fr, fg, fb, 5, 1, 0, r, g, b);
   } else if (pct >= 10) {
-    dimDigit(fr, fg, fb, 1, 1, pct / 10, r, g, b);
-    dimDigit(fr, fg, fb, 4, 1, pct % 10, r, g, b);
+    // two digits at the outer edges, columns 3 and 4 stay dark
+    dimDigit(fr, fg, fb, 0, 1, pct / 10, r, g, b);
+    dimDigit(fr, fg, fb, 5, 1, pct % 10, r, g, b);
   } else {
     dimDigit(fr, fg, fb, 3, 1, pct, r, g, b);
-  }
-
-  // two-row level bar, filled from the bottom row up: the glowing part grows
-  // like the lamp output
-  int lit = (pct * 16 + 50) / 100;
-  for (int x = 0; x < 8; x++) {
-    for (int y = 6; y < 8; y++) {
-      int cell = (7 - y) * 8 + x;
-      if (cell < lit) dimSet(fr, fg, fb, x, y, r, g, b);
-      else dimSet(fr, fg, fb, x, y, 12, 10, 8);
-    }
   }
 
   // Rotation is shown as raw device orientation on purpose.

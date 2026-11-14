@@ -85,9 +85,9 @@ The second effect turns the badge into a rotary dimmer for a real lamp:
 - **Flat on the table**: gravity is perpendicular to the screen and carries no
   angle, so the gyro Z rate is integrated instead (with hysteresis at
   `KNOB_FLAT_G`, 0.8 dps dead band and the zero point relearned while still).
-- **Display** — the percentage in 3×5 digits plus a two-row level bar, fixed to
-  the board (no upright correction), so it turns with the badge like a real
-  knob.
+- **Display** — just the percentage, in 3×5 digits spread to the outer three
+  columns each so the two digits never touch. Fixed to the board (no upright
+  correction), so it turns with the badge like a real knob.
 - **Publishing** — `{"pct":N}` on `ledbadge/knob`, retained, at most 5
   messages/s and only when the whole percent changes.
 - **Persistence** — the knob position is written to NVS once it has been still
