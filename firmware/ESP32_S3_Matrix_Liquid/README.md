@@ -197,8 +197,8 @@ hours --down--> minutes --left--> temp --up--> icon --up--> calendar
 
 | Item | Value |
 |---|---|
-| Wi-Fi SSID | `YOUR_WIFI_SSID` (editable on the web page) |
-| Wi-Fi password | `YOUR_WIFI_PASSWORD` (editable on the web page) |
+| Wi-Fi network 1 | SSID/password `YOUR_WIFI_SSID` (editable on the web page) |
+| Wi-Fi network 2 | optional second SSID/password, for a second home/office |
 | Fallback hotspot | `LedBadge-XXXX`, password `ledbadge`, page at `http://192.168.4.1/` |
 | Time | NTP (`pool.ntp.org`, `time.google.com`, `time.cloudflare.com`), Europe/Madrid by default |
 | Weather | Open-Meteo `current=temperature_2m,weather_code,is_day`, HTTPS |
@@ -209,16 +209,26 @@ hours --down--> minutes --left--> temp --up--> icon --up--> calendar
 settings page and MQTT messages stay reachable during the dimmer too. Only
 the weather download is paused outside the clock effect.
 
+Two Wi-Fi networks can be stored in the web page. On every connect (boot, link
+loss, settings change) the badge scans and picks the saved SSID that is actually
+in range — the stronger one if both are visible — so it works when you move it
+between two homes. If that network accepts the scan but never connects (wrong
+password, captive portal, AP gone), after 15 s it immediately tries the other
+saved network. Only when **both** fail does it open the setup hotspot; while the
+hotspot is up it keeps alternating between the two networks every 20 s, so it
+comes back online by itself as soon as one of them is reachable again. Clear
+the network 2 SSID in the web page to go back to a single network.
+
 As soon as the address is known, the badge scrolls it once across the matrix
 (`IP 192.168.1.50`) so you do not need the serial console to find the page.
 If the home network is unreachable, the hotspot name and `192.168.4.1` scroll
 instead.
 
-If the saved network cannot be reached (after roughly 35 s of retries) the
+If neither saved network can be reached (two failed connection attempts) the
 badge switches to `WIFI_AP_STA` and starts its own hotspot:
 
 ```
-WIFI: [YOUR_WIFI_SSID] unreachable, setup hotspot 'LedBadge-3A1C' (pass 'ledbadge')
+WIFI: both networks unreachable, setup hotspot 'LedBadge-3A1C' (pass 'ledbadge')
 WIFI: open http://192.168.4.1
 ```
 
@@ -398,10 +408,12 @@ WIFI: settings http://192.168.1.50
 
 Open that address from any device on the same network to change:
 
-- **Wi-Fi network name and password** — the page sends the new credentials,
-  the badge reconnects and keeps serving the page during the reconnect. Leave
-  the password blank to keep the current one. If the network is lost the
-  hotspot fallback described above starts automatically.
+- **Wi-Fi network name and password** — two slots are available; fill the
+  second one if the badge is used in another apartment. The page sends the new
+  credentials, the badge reconnects and keeps serving the page during the
+  reconnect. Leave a password blank to keep the current one; clear the network 2
+  SSID to remove that slot. If both networks are lost the hotspot fallback
+  described above starts automatically.
 - **Time zone** — a list of common POSIX zones (Madrid, London, Lisbon,
   Paris/Berlin, Kyiv, Moscow, Dubai, Tokyo, New York, Los Angeles, UTC) plus a
   custom entry stored as-is.
@@ -427,8 +439,9 @@ Open that address from any device on the same network to change:
 
 Settings are stored in NVS (namespace `clock`: `tz`, `city`, `lat`, `lon`,
 `ipgeo`, `tcolor`, `tcset`, `pcolor`, `pauto`, `sched`, `dstart`, `nstart`,
-`dbright`, `nbright`, `wssid`, `wpass`, `mhost`, `mport`, `muser`, `mpass`,
-`mtopic`, `men`, `bletopic`, `bleen`, `bledisc`, `knob`) and survive reboots.
+`dbright`, `nbright`, `wssid`, `wpass`, `wssid2`, `wpass2`, `wnet`, `mhost`,
+`mport`, `muser`, `mpass`, `mtopic`, `men`, `bletopic`, `bleen`, `bledisc`,
+`knob`) and survive reboots.
 The badge's own brightness lives in the `liquid` namespace (`bright`); the
 lamp knob position is `clock/knob`. The defaults are compiled in at the top of
 the sketch (`CLOCK_WIFI_SSID`, `CLOCK_WIFI_PASS`, `CLOCK_TZ`, `FIXED_LAT`,

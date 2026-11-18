@@ -979,8 +979,17 @@ volatile bool mqttDirty = false;   // settings changed, reconnect needed
 // ---- Bluetooth -> MQTT bridge (configuration moved near the top) ----
 
 // ---- Wi-Fi credentials (editable from the web page) ----
+// Two independent networks so the badge can be moved between homes/offices.
 char wifiSsid[33] = CLOCK_WIFI_SSID;
 char wifiPass[65] = CLOCK_WIFI_PASS;
+char wifiSsid2[33] = "";
+char wifiPass2[65] = "";
+uint8_t wifiNet = 0;               // last network that worked (0 or 1)
+bool wifiNeedPick = true;          // scan for a known network on next connect
+
+static const char *wifiSsidOf(uint8_t n) { return n == 1 ? wifiSsid2 : wifiSsid; }
+static const char *wifiPassOf(uint8_t n) { return n == 1 ? wifiPass2 : wifiPass; }
+static bool wifiConfigured(uint8_t n) { return wifiSsidOf(n)[0] != '\0'; }
 
 // ---- user configuration (persisted in NVS namespace "clock") ----
 char clockTz[40] = CLOCK_TZ;
@@ -2023,6 +2032,19 @@ void loadClockConfig() {
     strncpy(wifiPass, pass.c_str(), sizeof(wifiPass) - 1);
     wifiPass[sizeof(wifiPass) - 1] = '\0';
   }
+  String ssid2 = clockPrefs.getString("wssid2", "");
+  if (ssid2.length() > 0 && ssid2.length() < sizeof(wifiSsid2)) {
+    strncpy(wifiSsid2, ssid2.c_str(), sizeof(wifiSsid2) - 1);
+    wifiSsid2[sizeof(wifiSsid2) - 1] = '\0';
+  }
+  String pass2 = clockPrefs.getString("wpass2", "");
+  if (pass2.length() < sizeof(wifiPass2)) {
+    strncpy(wifiPass2, pass2.c_str(), sizeof(wifiPass2) - 1);
+    wifiPass2[sizeof(wifiPass2) - 1] = '\0';
+  }
+  wifiNet = clockPrefs.getUChar("wnet", 0) ? 1 : 0;
+  if (!wifiConfigured(wifiNet)) wifiNet = wifiConfigured(1) ? 1 : 0;
+  wifiNeedPick = true;
 
   String mh = clockPrefs.getString("mhost", "");
   if (mh.length() < sizeof(mqttHost)) {
@@ -2068,8 +2090,9 @@ void loadClockConfig() {
 
   Serial.printf("CLOCK: config tz=[%s] city=[%s] %.3f,%.3f ipgeo=%u\n",
                 clockTz, clockCity, clockLat, clockLon, (unsigned)clockUseIp);
-  Serial.printf("WIFI: saved ssid=[%s]  MQTT: %s %s:%u topic=[%s]\n",
-                wifiSsid, mqttEnabled ? "on" : "off", mqttHost,
+  Serial.printf("WIFI: saved ssid1=[%s] ssid2=[%s] last=%u  MQTT: %s %s:%u topic=[%s]\n",
+                wifiSsid, wifiSsid2[0] ? wifiSsid2 : "-", (unsigned)wifiNet + 1,
+                mqttEnabled ? "on" : "off", mqttHost,
                 (unsigned)mqttPort, mqttTopic);
 }
 
@@ -2091,6 +2114,9 @@ void saveClockConfig() {
   clockPrefs.putUChar("nbright", nightBright);
   clockPrefs.putString("wssid", wifiSsid);
   clockPrefs.putString("wpass", wifiPass);
+  clockPrefs.putString("wssid2", wifiSsid2);
+  clockPrefs.putString("wpass2", wifiPass2);
+  clockPrefs.putUChar("wnet", wifiNet);
   clockPrefs.putString("mhost", mqttHost);
   clockPrefs.putUShort("mport", mqttPort);
   clockPrefs.putString("muser", mqttUser);
@@ -2106,6 +2132,48 @@ void saveClockConfig() {
 // ===================== Wi-Fi + time =====================
 void webBegin();
 
+// Pick the saved network that is actually in range (strongest one wins). If
+// neither is visible - hidden SSID, scan failure - keep the last one used.
+static int wifiScanPick() {
+  if (!wifiConfigured(1)) return wifiConfigured(0) ? 0 : -1;
+
+  int found = WiFi.scanNetworks();  // blocking, ~1-3 s, only at connect time
+  int best = -1;
+  int bestRssi = -1000;
+  if (found > 0) {
+    for (int i = 0; i < found; i++) {
+      String s = WiFi.SSID(i);
+      int rssi = WiFi.RSSI(i);
+      if (rssi <= bestRssi) continue;
+      if (s.equals(wifiSsid)) { best = 0; bestRssi = rssi; }
+      else if (s.equals(wifiSsid2)) { best = 1; bestRssi = rssi; }
+    }
+  }
+  WiFi.scanDelete();
+  if (best >= 0) return best;
+  return wifiConfigured(wifiNet) ? (int)wifiNet : -1;
+}
+
+static bool wifiHasAlternative() { return wifiConfigured(0) && wifiConfigured(1); }
+
+static uint8_t wifiOtherNet() {
+  if (!wifiConfigured(0)) return 1;
+  if (!wifiConfigured(1)) return 0;
+  return wifiNet ^ 1;
+}
+
+static void wifiSetNet(uint8_t n) {
+  if (n > 1 || !wifiConfigured(n) || n == wifiNet) return;
+  wifiNet = n;
+  Preferences p;
+  if (p.begin("clock", false)) {
+    p.putUChar("wnet", wifiNet);
+    p.end();
+  }
+  Serial.printf("WIFI: using network %u [%s]\n", (unsigned)wifiNet + 1,
+                wifiSsidOf(wifiNet));
+}
+
 // Start (or restart) the station connection. In setup-hotspot mode the AP
 // stays up, so the settings page remains reachable until the new network works.
 void wifiBegin() {
@@ -2114,18 +2182,28 @@ void wifiBegin() {
   clockNetTimer = millis();
 
   if (clockNetState == CLOCK_NET_AP) {
-    WiFi.begin(wifiSsid, wifiPass);
-    Serial.printf("WIFI: retrying [%s] while the setup hotspot is on\n", wifiSsid);
+    WiFi.begin(wifiSsidOf(wifiNet), wifiPassOf(wifiNet));
+    Serial.printf("WIFI: retrying [%s] while the setup hotspot is on\n",
+                  wifiSsidOf(wifiNet));
     return;
   }
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(wifiSsid, wifiPass);
+  if (wifiNeedPick) {
+    wifiNeedPick = false;
+    int pick = wifiScanPick();
+    if (pick >= 0) wifiSetNet((uint8_t)pick);
+  }
+  if (!wifiConfigured(wifiNet)) wifiSetNet(wifiOtherNet());
+
+  clockNetTimer = millis();  // the scan above can take a couple of seconds
+  WiFi.begin(wifiSsidOf(wifiNet), wifiPassOf(wifiNet));
   clockNetState = CLOCK_NET_CONNECTING;
-  Serial.printf("WIFI: connecting to [%s]\n", wifiSsid);
+  Serial.printf("WIFI: connecting to [%s] (network %u/2)\n",
+                wifiSsidOf(wifiNet), (unsigned)wifiNet + 1);
 }
 
-// The saved network cannot be reached: bring up an open settings hotspot.
+// Neither network worked: bring up an open settings hotspot.
 void wifiStartAp() {
   uint8_t mac[6];
   WiFi.macAddress(mac);
@@ -2133,13 +2211,13 @@ void wifiStartAp() {
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(apSsid, AP_PASSWORD);
-  WiFi.begin(wifiSsid, wifiPass); // keep trying the real network in parallel
+  WiFi.begin(wifiSsidOf(wifiNet), wifiPassOf(wifiNet)); // keep trying in parallel
 
   clockNetState = CLOCK_NET_AP;
   clockNetTimer = millis();
 
-  Serial.printf("WIFI: [%s] unreachable, setup hotspot '%s' (pass '%s')\n",
-                wifiSsid, apSsid, AP_PASSWORD);
+  Serial.printf("WIFI: both networks unreachable, setup hotspot '%s' (pass '%s')\n",
+                apSsid, AP_PASSWORD);
   Serial.print("WIFI: open http://");
   Serial.println(WiFi.softAPIP());
   webBegin();
@@ -2154,12 +2232,14 @@ void wifiStartAp() {
 
 // New credentials were stored on the web page: reconnect right away.
 void wifiApply() {
-  Serial.printf("WIFI: applying new network [%s]\n", wifiSsid);
+  Serial.printf("WIFI: applying settings (network %u: [%s], network 2: [%s])\n",
+                (unsigned)wifiNet + 1, wifiSsid, wifiSsid2[0] ? wifiSsid2 : "-");
   wifiFailCount = 0;
+  wifiNeedPick = true;
   mqttDirty = true;
 
   if (clockNetState == CLOCK_NET_AP) {
-    WiFi.begin(wifiSsid, wifiPass);
+    WiFi.begin(wifiSsidOf(wifiNet), wifiPassOf(wifiNet));
     clockNetTimer = millis();
     return;
   }
@@ -2176,11 +2256,19 @@ void wifiApply() {
 
 void wifiOnline(unsigned long now) {
   wifiFailCount = 0;
+  wifiNeedPick = true;  // on the next link loss, look for whichever AP is here
+  Preferences p;
+  if (p.begin("clock", false)) {
+    p.putUChar("wnet", wifiNet);
+    p.end();
+  }
   if (clockNetState == CLOCK_NET_AP) {
     WiFi.softAPdisconnect(true);
     Serial.println("WIFI: setup hotspot closed");
   }
   clockNetState = CLOCK_NET_ONLINE;
+  Serial.printf("WIFI: connected via network %u [%s]\n", (unsigned)wifiNet + 1,
+                wifiSsidOf(wifiNet));
   Serial.print("WIFI: ok, IP ");
   Serial.println(WiFi.localIP());
   Serial.print("WIFI: settings http://");
@@ -2215,12 +2303,14 @@ void netLoop() {
         wifiOnline(now);
       } else if (now - clockNetTimer > 15000UL) {
         wifiFailCount++;
-        if (wifiFailCount >= 2) {
+        if (wifiFailCount >= 2 || !wifiHasAlternative()) {
           wifiStartAp();
         } else {
-          Serial.println("WIFI: timeout, retrying");
-          clockNetState = CLOCK_NET_RETRY;
-          clockNetTimer = now;
+          // First AP did not answer: try the other saved network right away.
+          wifiSetNet(wifiOtherNet());
+          Serial.printf("WIFI: timeout, trying the other network [%s]\n",
+                        wifiSsidOf(wifiNet));
+          wifiBegin();
         }
       }
       break;
@@ -2233,6 +2323,7 @@ void netLoop() {
           wifiStartAp();
         } else {
           wifiFailCount++;
+          wifiNeedPick = true;  // badge may have been moved to the other home
           wifiBegin();
         }
       }
@@ -2243,7 +2334,10 @@ void netLoop() {
         wifiOnline(now);
       } else if (now - clockNetTimer > 20000UL) {
         clockNetTimer = now;
-        WiFi.begin(wifiSsid, wifiPass);
+        if (wifiHasAlternative()) wifiSetNet(wifiOtherNet());
+        WiFi.begin(wifiSsidOf(wifiNet), wifiPassOf(wifiNet));
+        Serial.printf("WIFI: retrying [%s] while the setup hotspot is on\n",
+                      wifiSsidOf(wifiNet));
       }
       break;
 
@@ -3164,9 +3258,10 @@ void handleRoot() {
     page += "setup hotspot " + String(apSsid) + " &middot; http://" +
             WiFi.softAPIP().toString();
   } else if (WiFi.status() == WL_CONNECTED) {
-    page += htmlEscape(wifiSsid) + " &middot; " + WiFi.localIP().toString();
+    page += htmlEscape(wifiSsidOf(wifiNet)) + " (" + String(wifiNet + 1) + "/2) &middot; " +
+            WiFi.localIP().toString();
   } else {
-    page += "connecting to " + htmlEscape(wifiSsid) + "&hellip;";
+    page += "connecting to " + htmlEscape(wifiSsidOf(wifiNet)) + "&hellip;";
   }
   page += "<br><b>MQTT</b> ";
   if (!mqttEnabled) {
@@ -3185,14 +3280,22 @@ void handleRoot() {
 
   page += F("<form action='/save' method='get'>");
   page += F("<h2>Wi-Fi</h2>");
-  page += F("<label>Home network name (SSID)</label><input type='text' name='ssid' value='");
+  page += F("<p class='hint'>Two networks can be stored. At boot the badge scans and uses "
+            "whichever is in range; if a connection fails it tries the other one "
+            "automatically. Leave network 2 empty if you only have one.</p>");
+  page += F("<label>Network 1 &mdash; name (SSID)</label><input type='text' name='ssid' value='");
   page += htmlEscape(wifiSsid);
   page += F("'>");
-  page += F("<label>Password</label><input type='password' name='wpass' value='' "
+  page += F("<label>Network 1 &mdash; password</label><input type='password' name='wpass' value='' "
             "placeholder='leave blank to keep the current password' autocomplete='new-password'>");
-  page += F("<p class='hint'>If this network cannot be reached the badge starts the hotspot "
-            "<b>LedBadge-XXXX</b> (password <b>" AP_PASSWORD "</b>). Connect to it and open "
-            "http://192.168.4.1/ to fix the settings.</p>");
+  page += F("<label>Network 2 &mdash; name (SSID)</label><input type='text' name='ssid2' value='");
+  page += htmlEscape(wifiSsid2);
+  page += F("'>");
+  page += F("<label>Network 2 &mdash; password</label><input type='password' name='wpass2' value='' "
+            "placeholder='leave blank to keep the current password' autocomplete='new-password'>");
+  page += F("<p class='hint'>Clear the network 2 SSID to remove it. If neither network is "
+            "reachable the badge starts the hotspot <b>LedBadge-XXXX</b> (password <b>" AP_PASSWORD
+            "</b>). Connect to it and open http://192.168.4.1/ to fix the settings.</p>");
 
   page += F("<h2>Time</h2>");
   page += F("<label>Time zone</label><select name='tz'>");
@@ -3473,7 +3576,34 @@ void handleSave() {
     wifiPass[sizeof(wifiPass) - 1] = '\0';
     wifiChanged = true;
   }
-  if (wifiChanged) msg += "Wi-Fi credentials saved; reconnecting. ";
+
+  // ---- second Wi-Fi network ----
+  if (webServer.hasArg("ssid2")) {
+    String s2 = webServer.arg("ssid2");
+    s2.trim();
+    if (s2.length() < sizeof(wifiSsid2) && s2 != String(wifiSsid2)) {
+      wifiSsid2[0] = '\0';
+      if (s2.length()) {
+        strncpy(wifiSsid2, s2.c_str(), sizeof(wifiSsid2) - 1);
+        wifiSsid2[sizeof(wifiSsid2) - 1] = '\0';
+      } else {
+        // SSID cleared: drop the password too, the slot is now empty.
+        wifiPass2[0] = '\0';
+        if (wifiNet == 1) wifiNet = 0;
+      }
+      wifiChanged = true;
+    }
+  }
+  String wp2 = webServer.arg("wpass2");
+  if (wp2.length() && wp2 != String(wifiPass2) && wp2.length() < sizeof(wifiPass2)) {
+    strncpy(wifiPass2, wp2.c_str(), sizeof(wifiPass2) - 1);
+    wifiPass2[sizeof(wifiPass2) - 1] = '\0';
+    wifiChanged = true;
+  }
+  if (wifiChanged) {
+    wifiNeedPick = true;
+    msg += "Wi-Fi settings saved; reconnecting. ";
+  }
 
   // ---- MQTT settings ----
   bool mqttChanged = false;
