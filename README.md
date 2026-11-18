@@ -8,7 +8,7 @@ two complete Arduino sketches for it:
 
 | Sketch | What it does |
 |---|---|
-| [**ESP32_S3_Matrix_Liquid**](firmware/ESP32_S3_Matrix_Liquid/) | A six-page clock with live weather, an animated sun and moon, a tear-off calendar, a scrolling weekday, a lamp dimmer for Home Assistant, MQTT messages and 8×8 pictures. |
+| [**ESP32_S3_Matrix_Liquid**](firmware/ESP32_S3_Matrix_Liquid/) | A six-page clock with live weather and exact Pixel IT icons, a tear-off calendar, a scrolling weekday, a lamp dimmer for Home Assistant, MQTT messages and 8×8 pictures. |
 | [**ESP32_S3_Matrix_Digital_Level**](firmware/ESP32_S3_Matrix_Digital_Level/) | A digital spirit level: the matrix becomes a smooth bubble level with single-axis, dual-axis and digital-angle modes. Ported from [SMDVIBE's ESP32 Digital Spirit Level](https://github.com/SMDVIBE/ESP32-Digital-Spirit-Level). |
 
 Both sketches are flashed to the same board; pick one. The clock sketch is the
@@ -22,10 +22,12 @@ main project here.
 - **Weather** — current conditions from Open-Meteo (temperature, weather code,
   day/night), refreshed every 15 minutes. Seven icon kinds, each with a day and
   a night variant.
-- **Animated sun** — a round 4×4 core with eight rays; a slow brightness wave
-  travels around the rays so each one fades out and in smoothly.
-- **Night sky** — a golden crescent with twinkling stars and a shooting star
-  every seven seconds; night clouds keep a cold blue-grey tint.
+- **Night-only clock** — during the night window the badge shows just hours and
+  minutes; weather, temperature, date and weekday come back in the morning.
+  It uses the same two times as the brightness schedule and can be enabled
+  independently of it.
+- **Matrix off switch** — brightness `0` turns the matrix off completely, even
+  when the day/night schedule is on; `1` is the faintest visible level.
 - **Lamp dimmer** — double-click BOOT and the badge becomes a rotary dimmer
   for a real lamp: turn it upright or spin it flat on the table, and the angle
   is published to MQTT for Home Assistant to drive a smart bulb.
@@ -45,32 +47,22 @@ main project here.
 ### Six clock pages
 
 The 8×8 window visits a 16×24 canvas one screen at a time, gliding between the
-pages with a smoothstep ease.
+pages with a smoothstep ease. The calendar sheet and the weekday ticker move as
+one continuous strip with a one-pixel gap between them.
 
 [![Clock pages](docs/images/clock-pages.png)](docs/images/clock-pages.png)
 
 ### Weather icons
 
-Every kind has a day and a night rendering. Clouds, drops, snowflakes and fog
-bands are drawn at fractional positions, so they glide instead of jumping
-between LEDs.
+The clock uses the **exact 8×8 animated icons from Pixel IT** — the OpenWeather
+bitmaps that Home Assistant / Node-RED send to those displays. They are stored
+verbatim in `pixelit_icons.h` (PixelIt.API IDs 551–568), drawn in their original
+RGB565 colours and advanced every 150 ms, just like on the original clock. A
+separate day and night bitmap is used for every condition.
 
 [![Day weather icons](docs/images/weather-day.png)](docs/images/weather-day.png)
 
 [![Night weather icons](docs/images/weather-night.png)](docs/images/weather-night.png)
-
-### Sun animation
-
-The eight rays share one sine wave. Each ray fades smoothly through its dark
-phase while the wave travels clockwise around the ring (one cycle ≈ 4 s).
-
-![Sun animation](docs/images/sun.gif)
-
-[![Sun phases](docs/images/sun-animation.png)](docs/images/sun-animation.png)
-
-### Night sky
-
-[![Moon animation](docs/images/moon-animation.png)](docs/images/moon-animation.png)
 
 ### Lamp dimmer
 
@@ -196,7 +188,8 @@ Open `http://<badge-ip>/` from any device on the same network. You can change:
 - time zone (list of common POSIX zones plus a custom entry);
 - weather city, or locate automatically by public IP;
 - hour/minute colour and temperature colour (fixed or automatic by value);
-- manual brightness and an optional day/night schedule;
+- manual brightness (`0` = matrix off) and an optional day/night schedule,
+  including a night-only "time only" mode;
 - MQTT broker, username, password and message topic;
 - the BLE advertisement relay and optional Home Assistant sensors.
 
@@ -302,6 +295,7 @@ the register map, modes and calibration procedure.
 
 - **Brightness** — the matrix is bright and runs warm. The firmware defaults
   are conservative; do not push all 64 LEDs to full white for long periods.
+  A manual brightness of `0` powers the matrix off and overrides the schedule.
 - **Weather demo** — set `WEATHER_DEMO 1` at the top of the clock sketch to
   cycle all 14 weather icons full screen (day and night). It is `0` in the
   shipped build. `WEATHER_DEMO_MS` sets the frame time (2 s).

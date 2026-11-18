@@ -152,38 +152,26 @@ hours --down--> minutes --left--> temp --up--> icon --up--> calendar
 - **Calendar sheet** — a tear-off calendar: an off-white paper sheet with a red
   binding strip along the top and today's date in 3×5 digits (centred for one
   or two digits, dark ink on paper).
-- **Weekday ticker** — after the calendar has slid away, the weekday scrolls in
-  from the right edge and crosses the page (`SATURDAY`) in pure white, so it
-  stands out from the coloured clock digits. It restarts from the right once
-  the word has left the screen.
-- **Weather icon** — a full-screen animated picture in natural colours. Every
-  element moves at a fractional position and is blended over the neighbouring
-  LEDs, so the pictures glide instead of stepping pixel by pixel. When Open-Meteo
-  reports `is_day = 0` (night or after sunset) the daytime sun is replaced by a
-  night set built from a reference 8×8 bitmap: a golden crescent, single-pixel
-  pale stars and cool blue-grey clouds.
-   - **Sun** — the 8×8 reference bitmap: a round 4×4 core with cut corners and
-     eight one-pixel rays. The rays are animated by a slow wave travelling
-     around them, so each fades out and in smoothly, one after another.
-   - **Moon** — the reference gold crescent and five twinkling single-pixel
-     stars, with a shooting star that crosses the sky every ~7 s.
-   - **Partly cloudy** — small pulsing sun by day; at night a golden crescent
-     badge and two stars behind the clouds.
-   - **Cloudy** — two cloud layers drifting in opposite directions; at night the
-     layers turn blue-grey and the moon badge plus stars show behind them.
-   - **Rain** — drifting cloud, five drops falling at different speeds with
-     motion streaks, tiny splashes on the bottom row. At night the cloud is
-     blue-grey and stars sit in the free top corners.
-   - **Snow** — five flakes swaying side to side while falling, each twinkling
-     on its own rhythm; same night tint and stars as rain.
-   - **Thunderstorm** — dark cloud with a double lightning flash, a warm
-     afterglow halo around the bolt and faint rain underneath; the cloud takes a
-     cold blue-grey tone at night.
-   - **Fog** — four wavy bands drifting at different speeds and bending as they
-     move; at night the bands are dimmer and a faint golden crescent shows
-     through the mist.
+- **Weekday ticker** — the weekday sits one pixel after the calendar sheet and
+  is pulled out together with it (`SATURDAY`, pure white), so the two move as
+  one uninterrupted strip. After the glide the word keeps scrolling left and
+  restarts from the right once it has left the screen.
+- **Weather icon** — the **exact 8×8 animated bitmaps used by Pixel IT**, the
+  OpenWeather set that Home Assistant / Node-RED send to those clocks. They are
+  stored verbatim (`pixelit_icons.h`, PixelIt.API IDs 551–568) and drawn pixel
+  for pixel in their original RGB565 colours: no procedural shapes, no
+  approximation. Frames advance every 150 ms, exactly like on a Pixel IT
+  display. When Open-Meteo reports `is_day = 0` the matching night bitmap is
+  used instead.
+   - **Clear** — `01d` / `01n`: bright sun, or a moon with stars.
+   - **Partly cloudy** — `02d` / `02n`: sun or moon behind a small cloud.
+   - **Cloudy** — `04d` / `04n`: overcast cloud layers.
+   - **Rain** — `10d` / `10n`: cloud with falling drops.
+   - **Snow** — `13d` / `13n`: cloud with snowflakes.
+   - **Thunderstorm** — `11d` / `11n`: cloud with a lightning flash.
+   - **Fog** — `50d` / `50n`: layered mist bands.
    - **Loading** — grey cloud with three bobbing dots until the first
-     download arrives.
+     download arrives (kept from the old set, it is not a weather condition).
 - **Glide** — the viewport moves one screen (8 px) per step with a smoothstep
   ease and a short pause on each page. The glide scales with the dynamics hold
   (`CLOCK_MOVE_MS`); each page rests 2.6–4.2 s.
@@ -330,7 +318,7 @@ so a single **LED Badge** device appears in Home Assistant by itself:
 | IP address | sensor | `ledbadge/state` → `ip` |
 | Uptime | sensor (s) | `ledbadge/state` → `uptime` |
 | Free memory | sensor (B) | `ledbadge/state` → `heap` |
-| Brightness | number, 1–255 step 1 | `ledbadge/bright/set` / `ledbadge/bright` |
+| Brightness | number, 0–255 step 1 (0 = matrix off) | `ledbadge/bright/set` / `ledbadge/bright` |
 | Knob | sensor (%) | `ledbadge/knob` → `pct` |
 | Message | text (max 160) | publishes to the message topic |
 | Bitmap 8x8 | text (max 205) | publishes to `ledbadge/bitmap` |
@@ -424,12 +412,22 @@ Open that address from any device on the same network to change:
   *Follow the base colour* to let a single click on BOOT change them.
 - **Temperature colour** — a colour picker for the degrees, or tick *Colour by
   temperature* to keep the automatic blue-to-orange scale.
-- **Manual brightness** — 1–255, stored as `liquid/bright`.
+- **Manual brightness** — 0–255, stored as `liquid/bright`. `0` is a hard off
+  switch: the matrix goes dark even when the day/night schedule is enabled;
+  `1` is the faintest visible level. Day and night brightness can also be `0`,
+  which turns the matrix off for that part of the day. Home Assistant's
+  brightness slider and the lamp knob at 0% use the same value.
 - **Day/night schedule** — when enabled, the badge uses *day brightness*
   between *day starts* and *night starts* and *night brightness* for the rest
   of the day (the window may wrap midnight). It needs a synced clock; before
   the first NTP sync the manual brightness is used. Both times default to
   08:00 and 22:00.
+- **At night show only the time** — while the night window above is active the
+  clock shows just the hours and minutes: weather, temperature, date and
+  weekday pages are skipped. They come back automatically at *day starts*.
+  Weather and time still update in the background. This does not require the
+  brightness schedule checkbox — it uses the same two times, so you can show
+  only the time at night while keeping brightness manual if you like.
 - **Lamp knob** — a short explanation of the dimmer with the MQTT topic and a
   ready-to-paste Home Assistant automation.
 - **MQTT** — enable, broker host/port, username, password and message topic.
@@ -439,7 +437,7 @@ Open that address from any device on the same network to change:
 
 Settings are stored in NVS (namespace `clock`: `tz`, `city`, `lat`, `lon`,
 `ipgeo`, `tcolor`, `tcset`, `pcolor`, `pauto`, `sched`, `dstart`, `nstart`,
-`dbright`, `nbright`, `wssid`, `wpass`, `wssid2`, `wpass2`, `wnet`, `mhost`,
+`dbright`, `nbright`, `ntonly`, `wssid`, `wpass`, `wssid2`, `wpass2`, `wnet`, `mhost`,
 `mport`, `muser`, `mpass`, `mtopic`, `men`, `bletopic`, `bleen`, `bledisc`,
 `knob`) and survive reboots.
 The badge's own brightness lives in the `liquid` namespace (`bright`); the

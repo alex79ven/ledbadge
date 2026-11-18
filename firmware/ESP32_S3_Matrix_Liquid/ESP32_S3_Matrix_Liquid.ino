@@ -41,6 +41,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include "pixelit_icons.h"   // exact Pixel IT / OpenWeather 8x8 weather bitmaps
 
 #define LED_PIN       14  // onboard 8x8 RGB LED matrix (WS2811)
 #define RGB_COUNT     64
@@ -240,7 +241,7 @@ const unsigned long DOUBLE_CLICK_MS = 350;
 // once it reaches the top it walks back down again (ping-pong), so one hold
 // covers both directions. The value is stored as a percentage in NVS.
 uint8_t dynPct = 100;         // 50 .. 200 %
-uint8_t ledBrightness = BRIGHTNESS; // 1 .. 255, adjustable from the web page
+uint8_t ledBrightness = BRIGHTNESS; // 0 .. 255, 0 = matrix off, adjustable from the web page
 bool longPressActive = false;
 int8_t dynDir = 1;
 unsigned long lastRampMs = 0;
@@ -387,7 +388,6 @@ void setup() {
   if (dynPct > DYN_MAX) dynPct = DYN_MAX;
 
   ledBrightness = prefs.getUChar("bright", BRIGHTNESS);
-  if (ledBrightness < 1) ledBrightness = 1;
   pixels.setBrightness(ledBrightness);
 
   // startup self-test: brief white flash
@@ -884,8 +884,9 @@ void renderDimmer() {
 //   hours --down--> minutes --left--> temp --up--> icon --up--> calendar
 //      --right--> weekday --down--> hours
 //
-// The weekday ticker scrolls in from the right after the calendar sheet has
-// slid away. Time comes from NTP over Wi-Fi, weather from Open-Meteo. While
+// The weekday ticker sits one pixel to the right of the calendar sheet and is
+// pulled out together with it. Time comes from NTP over Wi-Fi, weather from
+// Open-Meteo. While
 // the badge is running it also serves a small configuration page (its IP is
 // printed on the serial console) where you can pick the time zone, the
 // weather city, MQTT and Wi-Fi settings.
@@ -1010,24 +1011,36 @@ uint16_t dayStartMin = 8 * 60;
 uint16_t nightStartMin = 22 * 60;
 uint8_t dayBright = 180;
 uint8_t nightBright = 25;
+uint8_t nightTimeOnly = 0;          // 1 = at night show hours/minutes only
+
+// Is the configured night window active right now? Uses the same Day starts /
+// Night starts times as the brightness schedule and handles midnight wrap.
+// Before NTP sync we cannot know, so we treat it as day.
+bool isNightNow() {
+  time_t tt = time(nullptr);
+  if (tt < 1700000000) return false;
+  struct tm tmv;
+  localtime_r(&tt, &tmv);
+  int mins = tmv.tm_hour * 60 + tmv.tm_min;
+  if (dayStartMin <= nightStartMin) {
+    return !(mins >= (int)dayStartMin && mins < (int)nightStartMin);
+  }
+  return (mins >= (int)nightStartMin && mins < (int)dayStartMin);
+}
+
+// Night-only clock: hide weather, temperature, calendar and weekday.
+bool nightOnlyActive() { return nightTimeOnly && isNightNow(); }
 
 // Effective LED brightness: the manual value unless the day/night schedule is
 // enabled and the local time is known. Handles windows that wrap midnight.
 uint8_t brightnessNow() {
+  // Manual 0 is a hard off switch: it wins over the day/night schedule so the
+  // matrix can always be extinguished from the web page or Home Assistant.
+  if (ledBrightness == 0) return 0;
   if (!brightSched) return ledBrightness;
   time_t tt = time(nullptr);
   if (tt < 1700000000) return ledBrightness; // NTP not synced yet
-
-  struct tm tmv;
-  localtime_r(&tt, &tmv);
-  int mins = tmv.tm_hour * 60 + tmv.tm_min;
-  bool day;
-  if (dayStartMin <= nightStartMin) {
-    day = (mins >= (int)dayStartMin && mins < (int)nightStartMin);
-  } else {
-    day = !(mins >= (int)nightStartMin && mins < (int)dayStartMin);
-  }
-  return day ? dayBright : nightBright;
+  return isNightNow() ? nightBright : dayBright;
 }
 
 
@@ -1473,6 +1486,45 @@ uint8_t weatherKind(uint8_t code) {
   return W_CLOUDY;
 }
 
+// ---- exact Pixel IT / OpenWeather weather icons --------------------------
+// These are the same animated 8x8 bitmaps that Home Assistant / Node-RED send
+// to a Pixel IT display (PixelIt.API IDs 551-568). RGB565 is expanded to 24-bit
+// here so the colours match the original display pixel for pixel.
+static void drawPixelItBitmap(uint8_t idx, uint8_t frame) {
+  uint8_t count = PIXELIT_LEN[idx];
+  if (frame >= count) frame = 0;
+  // PIXELIT_START holds a pixel offset (not a frame number).
+  const uint16_t *px = &PIXELIT_FRAMES[(uint16_t)PIXELIT_START[idx] + (uint16_t)frame * 64U];
+  for (int y = 0; y < 8; y++) {
+    for (int x = 0; x < 8; x++) {
+      uint16_t v = px[y * 8 + x];
+      if (v == 0) continue;  // transparent: leave the canvas black
+      float r = (float)(((v >> 11) & 0x1F) * 255 / 31);
+      float g = (float)(((v >> 5) & 0x3F) * 255 / 63);
+      float b = (float)((v & 0x1F) * 255 / 31);
+      canvasSet(ICON_PAGE_X + x, ICON_PAGE_Y + y, r, g, b);
+    }
+  }
+}
+
+static void drawPixelItIcon(uint8_t kind, bool day) {
+  // index = API id - 551; day 551..559, night 560..568.
+  uint8_t idx;
+  switch (kind) {
+    case W_CLEAR:  idx = day ? 0  : 9;  break;  // 01d / 01n  clear sky
+    case W_PARTLY: idx = day ? 1  : 10; break;  // 02d / 02n  few clouds
+    case W_CLOUDY: idx = day ? 3  : 12; break;  // 04d / 04n  broken clouds
+    case W_FOG:    idx = day ? 8  : 17; break;  // 50d / 50n  fog
+    case W_RAIN:   idx = day ? 5  : 14; break;  // 10d / 10n  rain
+    case W_SNOW:   idx = day ? 7  : 16; break;  // 13d / 13n  snow
+    case W_STORM:  idx = day ? 6  : 15; break;  // 11d / 11n  thunderstorm
+    default:       idx = day ? 3  : 12; break;
+  }
+  // Pixel IT plays these frames at 150 ms; keep the same rhythm.
+  uint8_t frame = (uint8_t)((millis() / 150UL) % PIXELIT_LEN[idx]);
+  drawPixelItBitmap(idx, frame);
+}
+
 void drawWeatherIconPage(float t) {
 #if WEATHER_DEMO
   // Day and night variant of each kind, two seconds apart, looping forever.
@@ -1490,30 +1542,11 @@ void drawWeatherIconPage(float t) {
   bool day = weatherIsDay != 0;
 #endif
 
-  switch (kind) {
-    case W_CLEAR:
-      if (day) drawSunIcon(t);
-      else drawMoonIcon(t);
-      break;
-    case W_PARTLY:
-      drawPartlyIcon(day, t);
-      break;
-    case W_FOG:
-      drawFogIcon(day, t);
-      break;
-    case W_RAIN:
-      drawRainIcon(day, t);
-      break;
-    case W_SNOW:
-      drawSnowIcon(day, t);
-      break;
-    case W_STORM:
-      drawStormIcon(day, t);
-      break;
-    default:
-      drawCloudyIcon(day, t);
-      break;
-  }
+  // Exact Pixel IT bitmaps replace the old procedural icons. The `t`
+  // parameter is no longer needed here: animation is frame-based, like on
+  // the original display.
+  (void)t;
+  drawPixelItIcon(kind, day);
 }
 
 void drawTempPage() {
@@ -1575,8 +1608,8 @@ void drawTempPage() {
 
 // ===================== calendar page =====================
 // A tear-off calendar sheet: red binding strip, off-white paper and today's
-// date in two 3x5 digits. The sheet slides away to the left and the weekday
-// ticker follows it (drawn by drawWeekdayPage()).
+// date in two 3x5 digits. The sheet slides away to the left and pulls the
+// weekday ticker with it, one pixel behind (drawn by drawWeekdayPage()).
 void drawCalendarPage() {
   // paper
   for (int y = 1; y < 8; y++) {
@@ -1758,18 +1791,25 @@ void renderBitmap() {
   showFrame(fr, fg, fb);
 }
 
-// Scrolling weekday for the top-right page. The text enters from the right
-// edge and is redrawn every frame; x is page-local (0..7 is visible).
-void drawWeekdayPage() {
-  if (!clockTimeReady()) return;
-
-  time_t now = time(nullptr);
-  struct tm tmv;
-  localtime_r(&now, &tmv);
+// Current weekday name, or nullptr until the clock has synced.
+static const char *weekdayName() {
+  if (!clockTimeReady()) return nullptr;
   static const char *const DAYS[7] = {
     "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"
   };
-  const char *txt = DAYS[tmv.tm_wday % 7];
+  time_t now = time(nullptr);
+  struct tm tmv;
+  localtime_r(&now, &tmv);
+  return DAYS[tmv.tm_wday % 7];
+}
+
+// Scrolling weekday for the top-right page. At the start of the calendar glide
+// the first glyph is placed one pixel after the sheet, so both move as one
+// strip; afterwards the text keeps scrolling and wraps from the right edge.
+// x is page-local (0..7 is visible).
+void drawWeekdayPage() {
+  const char *txt = weekdayName();
+  if (!txt) return;
 
   // Pure white so the ticker stands out from the coloured clock digits.
   const float r = 255.0f, g = 255.0f, b = 255.0f;
@@ -1807,10 +1847,12 @@ void renderClock() {
 #else
   drawClockHours(t);
   drawClockMinutes(t);
-  drawTempPage();
-  drawWeatherIconPage(t);
-  drawCalendarPage();
-  drawWeekdayPage();
+  if (!nightOnlyActive()) {
+    drawTempPage();
+    drawWeatherIconPage(t);
+    drawCalendarPage();
+    drawWeekdayPage();
+  }
 #endif
 
   // Sample an 8x8 window from the canvas with bilinear interpolation.
@@ -1895,8 +1937,28 @@ void clockGotoStage(uint16_t next, unsigned long now) {
   clockMoveToY = (float)CLOCK_STOP[next][1];
   clockMoveStart = now;
 
-  // The weekday starts off the right edge every time its page is shown.
-  if (next == 5) weekdayX = 8.0f;
+  // The weekday must already sit one pixel after the calendar sheet when the
+  // glide begins, otherwise it only appears after the sheet has left. Align
+  // the first *lit* glyph column, as some letters have a blank first column.
+  if (next == 5) {
+    const char *txt = weekdayName();
+    int firstCol = 5;
+    if (txt && *txt) {
+      int gi = (int)txt[0] - 32;
+      if (gi >= 0 && gi < 59) {
+        for (int col = 0; col < 5 && firstCol == 5; col++) {
+          for (int row = 0; row < 7; row++) {
+            if (MSG_FONT[gi][row] & (0x10 >> col)) {
+              firstCol = col;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (firstCol == 5) firstCol = 0;
+    weekdayX = 1.0f - (float)firstCol;
+  }
 
   float dyn = (float)dynPct / 100.0f;
   clockMoveDur = (unsigned long)((float)CLOCK_MOVE_MS / dyn);
@@ -1909,6 +1971,21 @@ void updateClock(float dt) {
   unsigned long now = millis();
 
   updateClockOrientation();
+
+  // Night-only mode has just two pages (hours, minutes). When the mode flips
+  // we snap to the hours page, so the viewport never lands on a blank stage.
+  bool timeOnly = nightOnlyActive();
+  static bool wasTimeOnly = false;
+  if (timeOnly != wasTimeOnly) {
+    wasTimeOnly = timeOnly;
+    clockStage = 0;
+    clockViewX = (float)CLOCK_STOP[0][0];
+    clockViewY = (float)CLOCK_STOP[0][1];
+    clockMoving = false;
+    clockNextMove = now + 1500UL;
+    weekdayX = 8.0f;
+  }
+  uint8_t stageCount = timeOnly ? 2 : CLOCK_STAGES;
 
   if (!clockMoving) {
     if (clockStage == 5) {
@@ -1926,7 +2003,7 @@ void updateClock(float dt) {
     }
 
     if ((long)(now - clockNextMove) >= 0) {
-      clockGotoStage((uint16_t)((clockStage + 1) % CLOCK_STAGES), now);
+      clockGotoStage((uint16_t)((clockStage + 1) % stageCount), now);
     }
     return;
   }
@@ -2017,6 +2094,7 @@ void loadClockConfig() {
   nightStartMin = clockPrefs.getUShort("nstart", 22 * 60);
   dayBright = clockPrefs.getUChar("dbright", 180);
   nightBright = clockPrefs.getUChar("nbright", 25);
+  nightTimeOnly = clockPrefs.getUChar("ntonly", 0) ? 1 : 0;
   if (dayStartMin >= 1440) dayStartMin = 8 * 60;
   if (nightStartMin >= 1440) nightStartMin = 22 * 60;
   if (dayBright < 1) dayBright = 1;
@@ -2112,6 +2190,7 @@ void saveClockConfig() {
   clockPrefs.putUShort("nstart", nightStartMin);
   clockPrefs.putUChar("dbright", dayBright);
   clockPrefs.putUChar("nbright", nightBright);
+  clockPrefs.putUChar("ntonly", nightTimeOnly);
   clockPrefs.putString("wssid", wifiSsid);
   clockPrefs.putString("wpass", wifiPass);
   clockPrefs.putString("wssid2", wifiSsid2);
@@ -2951,12 +3030,12 @@ void mqttPublishDiscovery() {
        "\"ic\":\"mdi:knob\",\"ent_cat\":\"diagnostic\"}";
   discPublish("sensor", "knob", p);
 
-  // Writable entities: a brightness slider (1..255, step 1) and a text box
-  // whose value is published straight to the scrolling-message topic.
+  // Writable entities: a brightness slider (0..255, step 1; 0 = matrix off)
+  // and a text box whose value is published straight to the message topic.
   p = discCommon("Brightness", "bright");
   p += ",\"stat_t\":\"" MQTT_BRIGHT_STATE_TOPIC "\","
        "\"cmd_t\":\"" MQTT_BRIGHT_SET_TOPIC "\","
-       "\"min\":1,\"max\":255,\"step\":1,\"mode\":\"slider\","
+       "\"min\":0,\"max\":255,\"step\":1,\"mode\":\"slider\","
        "\"ic\":\"mdi:brightness-6\"}";
   discPublish("number", "bright", p);
 
@@ -3005,7 +3084,6 @@ void mqttCallback(char *topic, byte *payload, unsigned int len) {
       }
     }
     if (!any) return;
-    if (v < 1) v = 1;
     if (v > 255) v = 255;
     brightCmd = v;
     return;
@@ -3352,15 +3430,18 @@ void handleRoot() {
   page += F("<label>Manual brightness: <span id='bval'>");
   page += String((int)ledBrightness);
   page += F("</span></label>");
-  page += F("<input type='range' name='bright' min='1' max='255' step='1' value='");
+  page += F("<input type='range' name='bright' min='0' max='255' step='1' value='");
   page += String((int)ledBrightness);
   page += F("' oninput=\"document.getElementById('bval').textContent=this.value\">");
+  page += F("<p class='hint'>0 switches the matrix off completely, even when "
+            "the day/night schedule is on; 1 is the faintest visible level.</p>");
 
   page += F("<div class='row'><input type='checkbox' id='sched' name='sched' value='1'");
   if (brightSched) page += F(" checked");
   page += F("><label for='sched' style='margin:0'>Use a day/night schedule</label></div>");
   page += F("<p class='hint'>The schedule needs a synced clock; until then the "
-            "manual brightness is used.</p>");
+            "manual brightness is used. Set day or night brightness to 0 to "
+            "switch the matrix off for that part of the day.</p>");
 
   page += F("<label>Day starts</label><input type='time' name='dstart' value='");
   page += hhmm(dayStartMin);
@@ -3372,16 +3453,25 @@ void handleRoot() {
   page += F("<label>Day brightness: <span id='dval'>");
   page += String((int)dayBright);
   page += F("</span></label>");
-  page += F("<input type='range' name='dbright' min='1' max='255' step='1' value='");
+  page += F("<input type='range' name='dbright' min='0' max='255' step='1' value='");
   page += String((int)dayBright);
   page += F("' oninput=\"document.getElementById('dval').textContent=this.value\">");
 
   page += F("<label>Night brightness: <span id='nval'>");
   page += String((int)nightBright);
   page += F("</span></label>");
-  page += F("<input type='range' name='nbright' min='1' max='255' step='1' value='");
+  page += F("<input type='range' name='nbright' min='0' max='255' step='1' value='");
   page += String((int)nightBright);
   page += F("' oninput=\"document.getElementById('nval').textContent=this.value\">");
+
+  page += F("<div class='row'><input type='checkbox' id='ntonly' name='ntonly' value='1'");
+  if (nightTimeOnly) page += F(" checked");
+  page += F("><label for='ntonly' style='margin:0'>At night show only the time "
+            "(no weather or temperature)</label></div>");
+  page += F("<p class='hint'>Night is the same window that sets the night brightness above "
+            "(from <b>Night starts</b> until <b>Day starts</b>). While it is active the badge "
+            "shows only hours and minutes; weather, temperature, date and weekday come back "
+            "in the morning. The temperature and weather still load in the background.</p>");
 
   page += F("<h2>Lamp knob</h2>");
   page += F("<p class='hint'>The second effect (<b>clock &rarr; dimmer</b>, double-press BOOT) "
@@ -3423,8 +3513,9 @@ void handleRoot() {
             MQTT_STATUS_TOPIC "</b>.</p>");
   page += F("<p class='hint'>Home Assistant discovery is automatic: on every connect the "
             "badge announces a <b>LED Badge</b> device with Wi-Fi signal, IP, uptime, memory, "
-            "a 1&ndash;255 brightness slider and a message text box. Nothing has to be added "
-            "by hand &mdash; open <b>Settings &rarr; Devices &amp; Services &rarr; MQTT</b>.</p>");
+            "a 0&ndash;255 brightness slider (0 = matrix off) and a message text box. "
+            "Nothing has to be added by hand &mdash; open "
+             "<b>Settings &rarr; Devices &amp; Services &rarr; MQTT</b>.</p>");
 
   page += F("<h2>Bluetooth &rarr; MQTT</h2>");
   page += F("<div class='row'><input type='checkbox' id='bleen' name='bleen' value='1'");
@@ -3468,12 +3559,14 @@ void handleSave() {
     msg += "Time zone updated. ";
   }
 
-  int bri = webServer.arg("bright").toInt();
-  if (bri >= 1 && bri <= 255 && bri != (int)ledBrightness) {
-    ledBrightness = (uint8_t)bri;
-    pixels.setBrightness(ledBrightness);
-    prefs.putUChar("bright", ledBrightness);
-    msg += "Brightness " + String(bri) + ". ";
+  if (webServer.hasArg("bright")) {
+    int bri = webServer.arg("bright").toInt();
+    if (bri >= 0 && bri <= 255 && bri != (int)ledBrightness) {
+      ledBrightness = (uint8_t)bri;
+      pixels.setBrightness(brightnessNow());
+      prefs.putUChar("bright", ledBrightness);
+      msg += "Brightness " + String(bri) + ". ";
+    }
   }
 
   uint8_t useIp = webServer.hasArg("ipgeo") ? 1 : 0;
@@ -3539,6 +3632,12 @@ void handleSave() {
     msg += sched ? "Day/night schedule on. " : "Day/night schedule off. ";
   }
 
+  uint8_t ntonly = webServer.hasArg("ntonly") ? 1 : 0;
+  if (ntonly != nightTimeOnly) {
+    nightTimeOnly = ntonly;
+    msg += ntonly ? "Night: time only. " : "Night: full clock. ";
+  }
+
   int ds = parseHHMM(webServer.arg("dstart"));
   if (ds >= 0 && ds != (int)dayStartMin) {
     dayStartMin = (uint16_t)ds;
@@ -3550,15 +3649,19 @@ void handleSave() {
     msg += "Night starts " + hhmm(nightStartMin) + ". ";
   }
 
-  int db = webServer.arg("dbright").toInt();
-  if (db >= 1 && db <= 255 && db != (int)dayBright) {
-    dayBright = (uint8_t)db;
-    msg += "Day brightness " + String(db) + ". ";
+  if (webServer.hasArg("dbright")) {
+    int db = webServer.arg("dbright").toInt();
+    if (db >= 0 && db <= 255 && db != (int)dayBright) {
+      dayBright = (uint8_t)db;
+      msg += "Day brightness " + String(db) + ". ";
+    }
   }
-  int nb = webServer.arg("nbright").toInt();
-  if (nb >= 1 && nb <= 255 && nb != (int)nightBright) {
-    nightBright = (uint8_t)nb;
-    msg += "Night brightness " + String(nb) + ". ";
+  if (webServer.hasArg("nbright")) {
+    int nb = webServer.arg("nbright").toInt();
+    if (nb >= 0 && nb <= 255 && nb != (int)nightBright) {
+      nightBright = (uint8_t)nb;
+      msg += "Night brightness " + String(nb) + ". ";
+    }
   }
 
   // ---- home Wi-Fi credentials ----
